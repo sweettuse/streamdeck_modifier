@@ -1,7 +1,12 @@
 from __future__ import annotations
+from collections import deque
 import os
+from pathlib import Path
+import threading
 import time
 from abc import ABC, abstractmethod
+
+from AppKit import NSWorkspace  # type: ignore
 
 from dataclasses import dataclass
 from functools import partial
@@ -64,7 +69,8 @@ class QuickSwitch(Action):
         if is_depressed:
             os.system(f"open {app_path(self.app_name)}")
         else:
-            pyautogui.hotkey("command", "command", "tab")
+            # extra "command"s because sometimes it doesn't seem to work otherwise
+            pyautogui.hotkey("command", "command", "command", "tab")
 
 
 @dataclass
@@ -75,11 +81,53 @@ class Switcher(Action):
 
     def __post_init__(self):
         super().__post_init__()
-        self._app_names = cycle(self.app_names)
+        self._app_paths = list(map(app_path, self.app_names))
+        self._app_cycle = self._cycle()
+
+    def _cycle(self):
+        return cycle(self._app_paths)
+
+    def __next__(self):
+        res = next(self._app_cycle)
+        if res == get_active_app_path():
+            res = next(self._app_cycle)
+        return res
 
     def __call__(self, is_depressed: bool):
         if is_depressed:
-            os.system(f"open {app_path(next(self._app_names))}")
+            os.system(f"open {next(self)}")
+
+
+@dataclass
+class SimpleAdaptiveSwitcher(Switcher):
+    """include `num_recent` apps in switch cycle in addition to those passed in
+
+    'recent' apps are ones that you've recently had active
+    """
+
+    num_recent: int = 1
+
+    def __post_init__(self):
+        super().__post_init__()
+        self._app_paths_set = set(self._app_paths)
+        self._recent: deque[str] = deque(maxlen=self.num_recent)
+        threading.Thread(target=self._update_recent, daemon=True).start()
+
+    def _cycle(self):
+        while True:
+            yield from self._app_paths
+            yield from list(self._recent)
+
+    def _update_recent(self):
+        """check every second for active app and update `_recent` if necessary"""
+        while True:
+            time.sleep(1)
+            app_path = get_active_app_path()
+            if app_path in self._app_paths_set:
+                continue
+            if app_path in self._recent:
+                continue
+            self._recent.append(app_path)
 
 
 @dataclass
@@ -119,22 +167,38 @@ class Modifier(Action):
 
 
 def app_path(path: str) -> str:
-    if path.startswith(("/", "~")):
-        return path
-    return f"/Applications/{path}"
+    """resolve absolute path and return space-escaped string representing that"""
+
+    def _helper():
+        if path.startswith("/"):
+            return path
+        if path.startswith("~"):
+            return str(Path(path).expanduser())
+        return f"/Applications/{path}"
+
+    return _helper().replace("\\", "").replace(" ", r"\ ")
+
+
+def get_active_app_path() -> str:
+    r"""return path with escaped spaces.
+
+    e.g. /Applications/Visual Studio Code.app -> /Applications/Visual\ Studio\ Code.app
+    """
+    active_app = NSWorkspace.sharedWorkspace().activeApplication()
+    return app_path(active_app["NSApplicationPath"])
 
 
 def register_actions():
     Modifier(0, "option")
     Modifier(1, "shift")
     Modifier(2, "control")
-    QuickSwitch(0, r"Brave\ Browser.app")
-    Switcher(
+    QuickSwitch(0, r"Brave Browser.app")
+    SimpleAdaptiveSwitcher(
         2,
         [
-            r"Visual\ Studio\ Code.app",
-            r"Brave\ Browser.app",
-            r"~/Applications/Brave\ Browser\ Apps.localized/Messages.app",
+            r"Visual Studio Code.app",
+            r"Brave Browser.app",
+            r"~/Applications/Brave Browser Apps.localized/Messages.app",
         ],
     )
 
