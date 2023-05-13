@@ -45,60 +45,18 @@ class Action(ABC):
             return
         action(is_depressed)
 
-
-@dataclass
-class Modifier(Action):
-    key: str
-
-    def __post_init__(self):
-        super().__post_init__()
-        atexit.register(partial(self._execute, "up"))
-        self._compile_script()
-
-    def _compile_script(self):
-        script = """
-        tell application "System Events"
-            key {up_or_down} {key}
-        end tell
-        """
-        script = dedent(script)
-        for up_or_down in ("up", "down"):
-            path = self._script_path(up_or_down)
-            with open(path, "w") as f:
-                data = script.format(up_or_down=up_or_down, key=self.key)
-                print(data)
-                f.write(data)
-            os.system(f"osacompile -o {path} {path}")
-
-    def _script_path(self, up_or_down):
-        return f"/tmp/.osa_{self.key}_{up_or_down}.scpt"
-
-    @property
-    def _script_down(self):
-        return self._script_path("down")
-
-    @property
-    def _script_up(self):
-        return self._script_path("up")
-
-    def __call__(self, is_depressed: bool):
-        self._execute("down" if is_depressed else "up")
-
-    def _execute(self, up_or_down: Literal["up", "down"]) -> None:
-        start = time.perf_counter()
-        os.system(f"osascript {self._script_path(up_or_down)}")
-        print(self.key, up_or_down, time.perf_counter() - start)
-
-
-def app_path(path: str) -> str:
-    if path.startswith(("/", "~")):
-        return path
-    return f"/Applications/{path}"
+    @classmethod
+    def display_registry(cls):
+        cls._registry = dict(sorted(cls._registry.items()))
+        for action in cls._registry.values():
+            print(action)
 
 
 @dataclass
 class QuickSwitch(Action):
-    """switch to an app on key down then switch back on key up you're done"""
+    """switch to an app while the pedal is held down then switch back to where you came
+    from on key up
+    """
 
     app_name: str
 
@@ -124,6 +82,48 @@ class Switcher(Action):
             os.system(f"open {app_path(next(self._app_names))}")
 
 
+@dataclass
+class Modifier(Action):
+    """press/release modifier keys on key down/up"""
+
+    key: str
+
+    def __post_init__(self):
+        super().__post_init__()
+        atexit.register(partial(self._execute, "up"))
+        self._compile_script()
+
+    def _compile_script(self):
+        """compile applescripts to press/release modifier keys"""
+        script = """
+        tell application "System Events"
+            key {up_or_down} {key}
+        end tell
+        """
+        script = dedent(script)
+        for up_or_down in ("up", "down"):
+            path = self._script_path(up_or_down)
+            with open(path, "w") as f:
+                data = script.format(up_or_down=up_or_down, key=self.key)
+                f.write(data)
+            os.system(f"osacompile -o {path} {path}")
+
+    def _script_path(self, up_or_down) -> str:
+        return f"/tmp/.osa_{self.key}_{up_or_down}.scpt"
+
+    def __call__(self, is_depressed: bool):
+        self._execute("down" if is_depressed else "up")
+
+    def _execute(self, up_or_down: Literal["up", "down"]) -> None:
+        os.system(f"osascript {self._script_path(up_or_down)}")
+
+
+def app_path(path: str) -> str:
+    if path.startswith(("/", "~")):
+        return path
+    return f"/Applications/{path}"
+
+
 def register_actions():
     Modifier(0, "option")
     Modifier(1, "shift")
@@ -138,13 +138,15 @@ def register_actions():
         ],
     )
 
+
 def __main():
     register_actions()
+    Action.display_registry()
     deck: StreamDeckPedal = DeviceManager().enumerate()[0]
     deck.open()
-    print(deck)
     deck.set_key_callback(Action.streamdeck_callback)
     time.sleep(40)
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     __main()
